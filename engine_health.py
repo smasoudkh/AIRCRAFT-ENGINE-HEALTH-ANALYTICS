@@ -1,10 +1,39 @@
-import pandas as pd
+import os
+import urllib
 import numpy as np
+import pandas as pd
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
 
-def analyze_engine_health(telemetry_data):
-    df = pd.DataFrame(telemetry_data)
+# Load environment variables from secure .env file
+load_dotenv()
+
+# ==========================================
+# ☁️ SECURE AZURE DATABASE CONFIGURATION
+# ==========================================
+SERVER = os.getenv('AZURE_SERVER')
+DATABASE = os.getenv('AZURE_DATABASE')
+USERNAME = os.getenv('AZURE_USERNAME')
+PASSWORD = os.getenv('AZURE_PASSWORD')
+DRIVER = '{ODBC Driver 17 for SQL Server}'
+
+# Create secure connection string for SQLAlchemy
+params = urllib.parse.quote_plus(
+    f"DRIVER={DRIVER};SERVER={SERVER};DATABASE={DATABASE};"
+    f"UID={USERNAME};PWD={PASSWORD}"
+)
+engine = create_engine(f"mssql+pyodbc:///?odbc_connect={params}")
+
+def fetch_telemetry_from_azure():
+    """Uses SQL queries to pull raw telemetry data from Azure SQL Cloud."""
+    query = "SELECT * FROM Flight_Telemetry_Raw"
+    return pd.read_sql(query, engine)
+
+def analyze_engine_health(df):
+    """Performs aviation engineering calculations and anomaly detection."""
+    df = df.sort_values(by='Flight_Number').reset_index(drop=True)
     
-    # Calculate EGT Margin (Safety buffer between max limit and recorded temp)
+    # Calculate EGT Margin (Safety buffer)
     df['EGT_Margin_C'] = df['Max_Allowed_EGT_C'] - df['Recorded_EGT_C']
     
     # Calculate Oil Loss and Flight Duration between stations
@@ -12,27 +41,33 @@ def analyze_engine_health(telemetry_data):
     df['Hours_Flown'] = df['Flight_Hours'].diff().fillna(0)
     
     # Calculate hourly oil consumption rate
-    df['Oil_Consumption_Rate'] = np.where(df['Hours_Flown'] > 0, df['Oil_Loss'] / df['Hours_Flown'], 0)
+    df['Oil_Consumption_Rate'] = np.where(
+        df['Hours_Flown'] > 0, df['Oil_Loss'] / df['Hours_Flown'], 0
+    )
+    
+    # Determine automated MRO maintenance alerts
+    df['Maintenance_Alert'] = 'NORMAL'
+    
+    # Standard shortened lines to pass PEP8 / E501 checks
+    df.loc[df['EGT_Margin_C'] <= 15, 'Maintenance_Alert'] = \
+        'CRITICAL EGT - Trigger Borescope'
+    df.loc[df['Oil_Consumption_Rate'] > 0.3, 'Maintenance_Alert'] = \
+        'HIGH OIL BURN - Check Bearing Seals'
+    df.loc[(df['EGT_Margin_C'] <= 15) & (df['Oil_Consumption_Rate'] > 0.3), 
+           'Maintenance_Alert'] = 'EMERGENCY - Ground Aircraft'
     
     return df
 
-# Simulated data for 7 consecutive Boeing 737 flights
-flight_telemetry = {
-    'Flight_Number': [101, 102, 103, 104, 105, 106, 107],
-    'Flight_Hours': [1000, 1005, 1011, 1016, 1022, 1028, 1034],
-    'Recorded_EGT_C': [580.0, 582.5, 595.0, 610.0, 635.5, 645.0, 648.2],
-    'Max_Allowed_EGT_C': [660.0, 660.0, 660.0, 660.0, 660.0, 660.0, 660.0],
-    'Oil_Quantity_Quarts': [16.0, 15.2, 14.5, 12.1, 11.0, 8.5, 7.2]
-}
+def save_analysis_to_azure(df):
+    """Saves processed diagnostics and alerts into Azure cloud table."""
+    df.to_sql('Engine_Health_Results', engine, if_exists='replace', index=False)
+    print("✅ Analysis successfully synced and saved to Azure SQL Database.")
 
-print("=== Azure Engine Health Core ===")
-results = analyze_engine_health(flight_telemetry)
-
-for idx, row in results.iterrows():
-    print(f"Flight {int(row['Flight_Number'])} | EGT Margin: {row['EGT_Margin_C']}°C | Oil Burn Rate: {row['Oil_Consumption_Rate']:.3f} Qts/Hr")
-    if row['EGT_Margin_C'] <= 15:
-        print(" ⚠️ [ALERT] Critical EGT Margin! Triggering Compressor Wash/Borescope Inspection.")
-    if row['Oil_Consumption_Rate'] > 0.3:
-        print(" ⚠️ [ALERT] High Oil Consumption! Check Bearing Seals.")
-    print("-" * 50)
-
+if __name__ == "__main__":
+    print("=== Starting Azure Engine Health Pipeline ===")
+    try:
+        raw_data = fetch_telemetry_from_azure()
+        processed_results = analyze_engine_health(raw_data)
+        save_analysis_to_azure(processed_results)
+    except Exception as e:
+        print(f"❌ Connection or Processing Error: {e}")
